@@ -179,15 +179,13 @@ func runCmd(cmd *base.Command, args []string) {
 		}
 
 		modDir, noCacheFile := findGoModDir(srcDir)
-		conf := &cl.Config{
-			Dir: modDir, TargetDir: srcDir, Fset: fset, CacheLoadPkgs: true, PersistLoadPkgs: !noCacheFile}
+		conf := &cl.Config{Dir: modDir, TargetDir: srcDir, Fset: fset, CacheLoadPkgs: true, PersistLoadPkgs: !noCacheFile}
 		out, err := cl.NewPackage("", mainPkg, conf)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(11)
 		}
-		err = saveGoFile(gofile, out)
-		if err != nil {
+		if err := saveGoFile(gofile, out); err != nil {
 			log.Fatalln("saveGoFile failed:", err)
 		}
 		conf.PkgsLoader.Save()
