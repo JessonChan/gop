@@ -128,7 +128,7 @@ func runCmd(cmd *base.Command, args []string) {
 	var pkgs map[string]*ast.Package
 	if isDir {
 		srcDir = src
-		gofile = src + "/gop_autogen.go"
+		gofile = filepath.Join(src, "gop_autogen.go")
 		isDirty = true // TODO: check if code changed
 		if isDirty {
 			pkgs, err = parser.ParseDir(fset, src, nil, 0)
