@@ -61,9 +61,7 @@ func init() {
 }
 
 func saveGoFile(gofile string, pkg *gox.Package) error {
-	dir := filepath.Dir(gofile)
-	err := os.MkdirAll(dir, 0777)
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(gofile), 0777); err != nil {
 		return err
 	}
 	return gox.WriteFile(gofile, pkg, false)
@@ -73,13 +71,11 @@ func findGoModFile(dir string) (modfile string, noCacheFile bool, err error) {
 	modfile, err = cl.FindGoModFile(dir)
 	if err != nil {
 		home := os.Getenv("HOME")
-		modfile = home + "/gop/go.mod"
-		if fi, e := os.Lstat(modfile); e == nil && !fi.IsDir() {
-			return modfile, true, nil
-		}
-		modfile = home + "/goplus/go.mod"
-		if fi, e := os.Lstat(modfile); e == nil && !fi.IsDir() {
-			return modfile, true, nil
+		for _, v := range []string{"/gop/go.mod", "/goplus/go.mod"} {
+			modfile = filepath.Join(home, v)
+			if fi, e := os.Lstat(modfile); e == nil && !fi.IsDir() {
+				return modfile, true, nil
+			}
 		}
 	}
 	return
@@ -117,6 +113,7 @@ func runCmd(cmd *base.Command, args []string) {
 	if *flagProf {
 		panic("TODO: profile not impl")
 	}
+	gox.SetDebug(gox.DbgFlagAll)
 
 	fset := token.NewFileSet()
 	src, _ := filepath.Abs(flag.Arg(0))
@@ -149,7 +146,7 @@ func runCmd(cmd *base.Command, args []string) {
 		} else if hasMultiFiles(srcDir, ".gop") {
 			gofile = filepath.Join(srcDir, "gop_autogen_"+file+".go")
 		} else {
-			gofile = srcDir + "/gop_autogen.go"
+			gofile = filepath.Join(srcDir, "gop_autogen.go")
 		}
 		isDirty = fileIsDirty(fi, gofile)
 		if isDirty {
