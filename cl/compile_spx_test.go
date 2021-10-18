@@ -90,7 +90,7 @@ func onMsg(msg string) {
 import spx "github.com/goplus/gop/cl/internal/spx"
 
 type Game struct {
-	spx.MyGame
+	*spx.MyGame
 }
 
 func (this *Game) onInit() {
@@ -141,7 +141,7 @@ import (
 const Foo = 1
 
 type index struct {
-	spx.MyGame
+	*spx.MyGame
 }
 
 func (this *index) bar() {
@@ -177,7 +177,7 @@ import (
 )
 
 type Game struct {
-	spx.MyGame
+	*spx.MyGame
 }
 
 func (this *Game) onInit() {
@@ -228,7 +228,7 @@ func onCloned() {
 import spx "github.com/goplus/gop/cl/internal/spx"
 
 type Game struct {
-	spx.MyGame
+	*spx.MyGame
 	Kai Kai
 }
 type Kai struct {
@@ -268,7 +268,7 @@ import (
 )
 
 type index struct {
-	spx.MyGame
+	*spx.MyGame
 	Kai Kai
 	t   spx.Sound
 }
@@ -277,16 +277,48 @@ type Kai struct {
 	*index
 }
 
-func (this *index) main() {
+func (this *index) MainEntry() {
 	spx.Gopt_MyGame_Run(this, "hzip://open.qiniu.us/weather/res.zip")
 }
 func main() {
-	app := new(index)
-	app.Initialize()
-	app.main()
+	spx.Gopt_MyGame_Main(new(index))
 }
 func (this *Kai) Main() {
 	fmt.Println("Hi")
 }
 `, "index.tgmx", "Kai.tspx")
+}
+
+func TestSpx2(t *testing.T) {
+	gopSpxTestEx(t, `
+println("Hi")
+`, `
+func onMsg(msg string) {
+}
+`, `package main
+
+import (
+	fmt "fmt"
+	spx2 "github.com/goplus/gop/cl/internal/spx2"
+)
+
+type Game struct {
+	spx2.Game
+}
+
+func (this *Game) MainEntry() {
+	fmt.Println("Hi")
+}
+func main() {
+	new(Game).Main()
+}
+
+type Kai struct {
+	spx2.Sprite
+	*Game
+}
+
+func (this *Kai) onMsg(msg string) {
+}
+`, "Game.t2gmx", "Kai.t2spx")
 }

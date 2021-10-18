@@ -14,38 +14,20 @@
  limitations under the License.
 */
 
-// Package gopfmt implements the ``gop fmt'' command.
-package gopfmt
+package main
 
 import (
-	"bytes"
+	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/qiniu/x/log"
-
-	"github.com/goplus/gop/cmd/internal/base"
 	"github.com/goplus/gop/format"
 )
-
-// Cmd - gop go
-var Cmd = &base.Command{
-	UsageLine: "gop fmt [-n] path ...",
-	Short:     "Format Go+ packages",
-}
-
-var (
-	flag        = &Cmd.Flag
-	flagNotExec = flag.Bool("n", false, "prints commands that would be executed.")
-)
-
-func init() {
-	Cmd.Run = runCmd
-}
 
 var (
 	procCnt    = 0
@@ -59,39 +41,62 @@ var (
 	rootDir = ""
 )
 
-func gopfmt(path string) (err error) {
-	src, err := ioutil.ReadFile(path)
-	if err != nil {
-		return
-	}
-	target, err := format.Source(src)
-	if err != nil {
-		return
-	}
-	if bytes.Equal(src, target) {
-		return
-	}
-	fmt.Println(path)
-	return writeFileWithBackup(path, target)
+var (
+	// main operation modes
+	write = flag.Bool("w", false, "write result to (source) file instead of stdout")
+)
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "usage: gopfmt [flags] [path ...]\n")
+	flag.PrintDefaults()
 }
 
-func writeFileWithBackup(path string, target []byte) (err error) {
-	dir, file := filepath.Split(path)
-	f, err := ioutil.TempFile(dir, file)
-	if err != nil {
-		return
+func report(err error) {
+	fmt.Println(err)
+	os.Exit(2)
+}
+
+func processFile(filename string, in io.Reader, out io.Writer) error {
+	if in == nil {
+		var err error
+		in, err = os.Open(filename)
+		if err != nil {
+			return err
+		}
 	}
-	tmpfile := f.Name()
-	_, err = f.Write(target)
-	f.Close()
+	src, err := ioutil.ReadAll(in)
 	if err != nil {
-		return
+		return err
 	}
-	err = os.Remove(path)
+
+	res, err := format.Source(src)
 	if err != nil {
-		return
+		return err
 	}
-	return os.Rename(tmpfile, path)
+
+	if *write {
+		dir, file := filepath.Split(filename)
+		f, err := ioutil.TempFile(dir, file)
+		if err != nil {
+			return err
+		}
+		tmpfile := f.Name()
+		_, err = f.Write(res)
+		f.Close()
+		if err != nil {
+			return err
+		}
+		err = os.Remove(filename)
+		if err != nil {
+			return err
+		}
+		return os.Rename(tmpfile, filename)
+	}
+	if !*write {
+		_, err = out.Write(res)
+	}
+
+	return err
 }
 
 func walk(path string, d fs.DirEntry, err error) error {
@@ -102,30 +107,33 @@ func walk(path string, d fs.DirEntry, err error) error {
 			return filepath.SkipDir
 		}
 	} else {
+		// Directories are walked, ignoring non-Gop files.
 		ext := filepath.Ext(path)
 		if _, ok := extGops[ext]; ok {
 			procCnt++
-			if *flagNotExec {
-				fmt.Println("gop fmt", path)
-			} else {
-				err = gopfmt(path)
-			}
+			err = processFile(path, nil, nil)
 		}
 	}
 	return err
 }
 
-func runCmd(cmd *base.Command, args []string) {
-	err := flag.Parse(args)
-	if err != nil {
-		log.Fatalln("parse input arguments failed:", err)
+func main() {
+	flag.Usage = usage
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) == 0 {
+		if *write {
+			report(fmt.Errorf("error: cannot use -w with standard input"))
+			return
+		}
+		if err := processFile("<standard input>", os.Stdin, os.Stdout); err != nil {
+			report(err)
+		}
+		return
 	}
-	narg := flag.NArg()
-	if narg < 1 {
-		cmd.Usage(os.Stderr)
-	}
-	for i := 0; i < narg; i++ {
-		path := flag.Arg(i)
+
+	for _, path := range args {
 		walkSubDir = strings.HasSuffix(path, "/...")
 		if walkSubDir {
 			path = path[:len(path)-4]

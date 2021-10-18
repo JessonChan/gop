@@ -17,10 +17,14 @@
 package spx2
 
 const (
-	Gop_sched = "Sched"
+	Gop_sched  = "Sched"
+	Gop_sprite = "Sprite"
 )
 
 type Game struct {
+}
+
+func (p *Game) Main() {
 }
 
 type Sprite struct {

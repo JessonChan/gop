@@ -18,7 +18,7 @@ package spx
 
 const (
 	GopPackage = true
-	Gop_game   = "MyGame"
+	Gop_game   = "*MyGame"
 	Gop_sched  = "Sched,SchedNow"
 )
 
@@ -27,7 +27,7 @@ type Sound string
 type MyGame struct {
 }
 
-func (p *MyGame) Initialize() {
+func Gopt_MyGame_Main(game interface{}) {
 }
 
 func (p *MyGame) Broadcast__0(msg string) {

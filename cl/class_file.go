@@ -40,6 +40,8 @@ type gmxInfo struct {
 var (
 	gmxTypes = map[string]gmxInfo{
 		".gmx": {".spx", []string{"github.com/goplus/spx", "math"}},
+		".spc": {"", []string{"github.com/qbox/gopla/spc", "github.com/goplus/spx", "math"}},
+		// TODO: dynamic register
 	}
 )
 
@@ -49,7 +51,9 @@ func RegisterClassFileType(extGmx, extSpx string, pkgPaths ...string) {
 		panic("RegisterClassFileType: no pkgPath specified")
 	}
 	parser.RegisterFileType(extGmx, ast.FileTypeGmx)
-	parser.RegisterFileType(extSpx, ast.FileTypeSpx)
+	if extSpx != "" {
+		parser.RegisterFileType(extSpx, ast.FileTypeSpx)
+	}
 	if _, ok := gmxTypes[extGmx]; !ok {
 		gmxTypes[extGmx] = gmxInfo{extSpx, pkgPaths}
 	}
@@ -58,12 +62,33 @@ func RegisterClassFileType(extGmx, extSpx string, pkgPaths ...string) {
 // -----------------------------------------------------------------------------
 
 type gmxSettings struct {
-	gameClass string
-	extSpx    string
-	game      gox.Ref
-	sprite    gox.Ref
-	scheds    []goast.Stmt // nil or len(scheds) == 2
-	pkgPaths  []string
+	gameClass  string
+	extSpx     string
+	game       gox.Ref
+	sprite     gox.Ref
+	scheds     []string
+	schedStmts []goast.Stmt // nil or len(scheds) == 2 (delayload)
+	pkgImps    []*gox.PkgRef
+	pkgPaths   []string
+	hasScheds  bool
+	gameIsPtr  bool
+}
+
+func (p *gmxSettings) getScheds(cb *gox.CodeBuilder) []goast.Stmt {
+	if !p.hasScheds {
+		return nil
+	}
+	if p.schedStmts == nil {
+		p.schedStmts = make([]goast.Stmt, 2)
+		for i, v := range p.scheds {
+			fn := cb.Val(spxLookup(p.pkgImps, v)).Call(0).InternalStack().Pop().Val
+			p.schedStmts[i] = &goast.ExprStmt{X: fn}
+		}
+		if len(p.scheds) < 2 {
+			p.schedStmts[1] = p.schedStmts[0]
+		}
+	}
+	return p.schedStmts
 }
 
 func newGmx(pkg *gox.Package, file string) *gmxSettings {
@@ -71,25 +96,35 @@ func newGmx(pkg *gox.Package, file string) *gmxSettings {
 	ext := filepath.Ext(name)
 	if idx := strings.Index(name, "."); idx > 0 {
 		name = name[:idx]
+		if name == "main" {
+			name = "_main"
+		}
 	}
 	gt := gmxTypes[ext]
 	pkgPaths := gt.pkgPaths
-	spx := pkg.Import(pkgPaths[0])
 	p := &gmxSettings{extSpx: gt.extSpx, gameClass: name, pkgPaths: pkgPaths}
-	p.game = spxRef(spx, "Gop_game", "Game")
-	p.sprite = spxRef(spx, "Gop_sprite", "Sprite")
+	p.pkgImps = make([]*gox.PkgRef, len(pkgPaths))
+	for i, pkgPath := range pkgPaths {
+		p.pkgImps[i] = pkg.Import(pkgPath)
+	}
+	spx := p.pkgImps[0]
+	p.game, p.gameIsPtr = spxRef(spx, "Gop_game", "Game")
+	if gt.extSpx != "" {
+		p.sprite, _ = spxRef(spx, "Gop_sprite", "Sprite")
+	}
 	if x := getStringConst(spx, "Gop_sched"); x != "" {
-		scheds := strings.SplitN(x, ",", 2)
-		p.scheds = make([]goast.Stmt, 2)
-		for i, v := range scheds {
-			fn := pkg.CB().Val(spx.Ref(v)).Call(0).InternalStack().Pop().Val
-			p.scheds[i] = &goast.ExprStmt{X: fn}
-		}
-		if len(scheds) < 2 {
-			p.scheds[1] = p.scheds[0]
-		}
+		p.scheds, p.hasScheds = strings.SplitN(x, ",", 2), true
 	}
 	return p
+}
+
+func spxLookup(pkgImps []*gox.PkgRef, name string) gox.Ref {
+	for _, pkg := range pkgImps {
+		if o := pkg.TryRef(name); o != nil {
+			return o
+		}
+	}
+	panic("spxLookup: symbol not found - " + name)
 }
 
 func getDefaultClass(file string) string {
@@ -100,11 +135,15 @@ func getDefaultClass(file string) string {
 	return name
 }
 
-func spxRef(spx *gox.PkgRef, name, typ string) gox.Ref {
+func spxRef(spx *gox.PkgRef, name, typ string) (obj gox.Ref, isPtr bool) {
 	if v := getStringConst(spx, name); v != "" {
 		typ = v
+		if strings.HasPrefix(typ, "*") {
+			typ, isPtr = typ[1:], true
+		}
 	}
-	return spx.Ref(typ)
+	obj = spx.Ref(typ)
+	return
 }
 
 func getStringConst(spx *gox.PkgRef, name string) string {
@@ -137,7 +176,7 @@ func getFields(ctx *blockCtx, f *ast.File) (specs []ast.Spec) {
 
 func setBodyHandler(ctx *blockCtx) {
 	if ctx.fileType > 0 { // in a Go+ class file
-		if scheds := ctx.scheds; scheds != nil {
+		if scheds := ctx.getScheds(ctx.cb); scheds != nil {
 			ctx.cb.SetBodyHandler(func(body *goast.BlockStmt, kind int) {
 				idx := 0
 				if len(body.List) == 0 {
@@ -150,15 +189,11 @@ func setBodyHandler(ctx *blockCtx) {
 }
 
 func gmxMainFunc(p *gox.Package, ctx *pkgCtx) {
-	if o := p.Types.Scope().Lookup(ctx.gameClass); o != nil && hasMethod(o, "main") {
-		// app := new(Game)
-		// app.Initialize()
-		// app.main()
-		cb := p.NewFunc(nil, "main", nil, nil, false).BodyStart(p)
-		cb.DefineVarStart(token.NoPos, "app").Val(p.Builtin().Ref("new")).Val(o).Call(1).EndInit(1)
-		app := cb.Scope().Lookup("app")
-		cb.Val(app).MemberVal("Initialize").Call(0).EndStmt().
-			Val(app).MemberVal("main").Call(0).EndStmt().
+	if o := p.Types.Scope().Lookup(ctx.gameClass); o != nil && hasMethod(o, "MainEntry") {
+		// new(Game).Main()
+		p.NewFunc(nil, "main", nil, nil, false).BodyStart(p).
+			Val(p.Builtin().Ref("new")).Val(o).Call(1).
+			MemberVal("Main").Call(0).EndStmt().
 			End()
 	}
 }
