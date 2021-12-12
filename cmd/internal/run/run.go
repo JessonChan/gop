@@ -1,40 +1,40 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 // Package run implements the ``gop run'' command.
 package run
 
 import (
-	"crypto/sha1"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 
+	"github.com/qiniu/x/log"
+	"golang.org/x/tools/go/packages"
+
 	"github.com/goplus/gop/ast"
 	"github.com/goplus/gop/cl"
 	"github.com/goplus/gop/cmd/gengo"
 	"github.com/goplus/gop/cmd/internal/base"
+	"github.com/goplus/gop/cmd/internal/modload"
 	"github.com/goplus/gop/parser"
 	"github.com/goplus/gop/scanner"
 	"github.com/goplus/gop/token"
 	"github.com/goplus/gox"
-	"github.com/qiniu/x/log"
-	"golang.org/x/tools/go/packages"
 )
 
 // -----------------------------------------------------------------------------
@@ -52,8 +52,13 @@ var (
 	flagQuiet   = flag.Bool("quiet", false, "don't generate any compiling stage log")
 	flagDebug   = flag.Bool("debug", false, "set log level to debug")
 	flagNorun   = flag.Bool("nr", false, "don't run if no change")
+	flagRTOE    = flag.Bool("rtoe", false, "remove tempfile on error")
 	flagGop     = flag.Bool("gop", false, "parse a .go file as a .gop file")
 	flagProf    = flag.Bool("prof", false, "do profile and generate profile report")
+)
+
+const (
+	parserMode = parser.ParseComments
 )
 
 func init() {
@@ -65,28 +70,6 @@ func saveGoFile(gofile string, pkg *gox.Package) error {
 		return err
 	}
 	return gox.WriteFile(gofile, pkg, false)
-}
-
-func findGoModFile(dir string) (modfile string, noCacheFile bool, err error) {
-	modfile, err = cl.FindGoModFile(dir)
-	if err != nil {
-		home := os.Getenv("HOME")
-		for _, v := range []string{"/gop/go.mod", "/goplus/go.mod"} {
-			modfile = filepath.Join(home, v)
-			if fi, e := os.Lstat(modfile); e == nil && !fi.IsDir() {
-				return modfile, true, nil
-			}
-		}
-	}
-	return
-}
-
-func findGoModDir(dir string) (string, bool) {
-	modfile, nocachefile, err := findGoModFile(dir)
-	if err != nil {
-		log.Fatalln("findGoModFile:", err)
-	}
-	return filepath.Dir(modfile), nocachefile
 }
 
 func runCmd(cmd *base.Command, args []string) {
@@ -124,43 +107,21 @@ func runCmd(cmd *base.Command, args []string) {
 	isDir := fi.IsDir()
 
 	var isDirty bool
-	var srcDir, file, gofile string
+	var srcDir, gofile string
 	var pkgs map[string]*ast.Package
 	if isDir {
 		srcDir = src
-		gofile = filepath.Join(src, "gop_autogen.go")
+		gofile = src + "/gop_autogen.go"
+		modload.Load()
 		isDirty = true // TODO: check if code changed
 		if isDirty {
-			pkgs, err = parser.ParseDir(fset, src, nil, 0)
+			pkgs, err = parser.ParseDir(fset, src, nil, parserMode)
 		} else if *flagNorun {
 			return
 		}
 	} else {
-		srcDir, file = filepath.Split(src)
-		isGo := filepath.Ext(file) == ".go"
-		if isGo {
-			hash := sha1.Sum([]byte(src))
-			dir := os.Getenv("HOME") + "/.gop/run"
-			os.MkdirAll(dir, 0777)
-			gofile = dir + "/g" + base64.RawURLEncoding.EncodeToString(hash[:]) + file
-		} else if hasMultiFiles(srcDir, ".gop") {
-			gofile = filepath.Join(srcDir, "gop_autogen_"+file+".go")
-		} else {
-			gofile = filepath.Join(srcDir, "gop_autogen.go")
-		}
-		isDirty = fileIsDirty(fi, gofile)
-		if isDirty {
-			if isGo {
-				fmt.Println("==> GenGo to", gofile)
-			}
-			if *flagGop {
-				pkgs, err = parser.Parse(fset, src, nil, 0)
-			} else {
-				pkgs, err = parser.Parse(fset, src, nil, 0) // TODO: only to check dependencies
-			}
-		} else if *flagNorun {
-			return
-		}
+		gopRun(src, args...)
+		return
 	}
 	if err != nil {
 		scanner.PrintError(os.Stderr, err)
@@ -195,14 +156,6 @@ func runCmd(cmd *base.Command, args []string) {
 	if *flagProf {
 		panic("TODO: profile not impl")
 	}
-}
-
-func fileIsDirty(fi os.FileInfo, gofile string) bool {
-	fiDest, err := os.Stat(gofile)
-	if err != nil {
-		return true
-	}
-	return fi.ModTime().After(fiDest.ModTime())
 }
 
 func goRun(file string, args []string) {
@@ -262,23 +215,6 @@ func runGoPkg(src string, args []string, doRun bool) {
 	if doRun {
 		goRun(src+"/.", args)
 	}
-}
-
-func hasMultiFiles(srcDir string, ext string) bool {
-	var has bool
-	if f, err := os.Open(srcDir); err == nil {
-		defer f.Close()
-		fis, _ := f.ReadDir(-1)
-		for _, fi := range fis {
-			if !fi.IsDir() && filepath.Ext(fi.Name()) == ext {
-				if has {
-					return true
-				}
-				has = true
-			}
-		}
-	}
-	return false
 }
 
 // -----------------------------------------------------------------------------

@@ -1,23 +1,24 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cl
 
 import (
 	"fmt"
+	"go/constant"
 	"log"
 	"path/filepath"
 	"reflect"
@@ -59,8 +60,8 @@ func commentStmt(ctx *blockCtx, stmt ast.Stmt) {
 func compileStmts(ctx *blockCtx, body []ast.Stmt) {
 	for _, stmt := range body {
 		if v, ok := stmt.(*ast.LabeledStmt); ok {
-			l := v.Label
-			ctx.cb.NewLabel(l.Pos(), l.Name)
+			expr := v.Label
+			ctx.cb.NewLabel(expr.Pos(), expr.Name)
 		}
 	}
 	for _, stmt := range body {
@@ -80,9 +81,14 @@ func compileStmt(ctx *blockCtx, stmt ast.Stmt) {
 	commentStmt(ctx, stmt)
 	switch v := stmt.(type) {
 	case *ast.ExprStmt:
-		compileExpr(ctx, v.X)
-		if canAutoCall(v.X) && isFunc(ctx.cb.InternalStack().Get(-1).Type) {
+		if obj, ok := isBuiltinAutoCall(ctx, v.X); ok {
+			ctx.cb.Val(obj)
 			ctx.cb.Call(0)
+		} else {
+			compileExpr(ctx, v.X)
+			if canAutoCall(v.X) && isFunc(ctx.cb.InternalStack().Get(-1).Type) {
+				ctx.cb.Call(0)
+			}
 		}
 	case *ast.AssignStmt:
 		compileAssignStmt(ctx, v)
@@ -139,6 +145,19 @@ retry:
 		goto retry
 	}
 	return false
+}
+
+func isBuiltinAutoCall(ctx *blockCtx, expr ast.Expr) (types.Object, bool) {
+	if ident, ok := expr.(*ast.Ident); ok {
+		switch ident.Name {
+		case "print", "println":
+			_, builtin := lookupType(ctx, ident.Name)
+			if isBuiltin(builtin) {
+				return builtin, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func compileReturnStmt(ctx *blockCtx, expr *ast.ReturnStmt) {
@@ -211,7 +230,18 @@ func compileAssignStmt(ctx *blockCtx, expr *ast.AssignStmt) {
 		compileExprLHS(ctx, lhs)
 	}
 	for _, rhs := range expr.Rhs {
-		compileExpr(ctx, rhs, twoValue)
+		switch e := rhs.(type) {
+		case *ast.LambdaExpr, *ast.LambdaExpr2:
+			if len(expr.Lhs) == 1 && len(expr.Rhs) == 1 {
+				typ := ctx.cb.Get(-1).Type.(interface{ Elem() types.Type }).Elem()
+				sig := checkLambdaFuncType(ctx, e, typ, clLambaAssign, expr.Lhs[0])
+				compileLambda(ctx, e, sig)
+			} else {
+				panic(ctx.newCodeErrorf(e.Pos(), "lambda unsupport multiple assignment"))
+			}
+		default:
+			compileExpr(ctx, rhs, twoValue)
+		}
 	}
 	if tok == token.ASSIGN {
 		ctx.cb.AssignWith(len(expr.Lhs), len(expr.Rhs), expr)
@@ -230,6 +260,14 @@ func compileAssignStmt(ctx *blockCtx, expr *ast.AssignStmt) {
 //    body
 // end
 func compileRangeStmt(ctx *blockCtx, v *ast.RangeStmt) {
+	if re, ok := v.X.(*ast.RangeExpr); ok {
+		tok := token.DEFINE
+		if v.Tok == token.ASSIGN {
+			tok = v.Tok
+		}
+		compileForStmt(ctx, toForStmt(v.For, v.Key, v.Body, re, tok))
+		return
+	}
 	cb := ctx.cb
 	comments := cb.Comments()
 	if v.Tok == token.DEFINE {
@@ -274,6 +312,10 @@ func compileRangeStmt(ctx *blockCtx, v *ast.RangeStmt) {
 }
 
 func compileForPhraseStmt(ctx *blockCtx, v *ast.ForPhraseStmt) {
+	if re, ok := v.X.(*ast.RangeExpr); ok {
+		compileForStmt(ctx, toForStmt(v.For, v.Value, v.Body, re, token.DEFINE))
+		return
+	}
 	cb := ctx.cb
 	comments := cb.Comments()
 	names := make([]string, 1, 2)
@@ -301,6 +343,82 @@ func compileForPhraseStmt(ctx *blockCtx, v *ast.ForPhraseStmt) {
 	cb.SetComments(comments, true)
 	setBodyHandler(ctx)
 	cb.End()
+}
+
+func toForStmt(forPos token.Pos, value ast.Expr, body *ast.BlockStmt, re *ast.RangeExpr, tok token.Token) *ast.ForStmt {
+	nilIdent := value == nil
+	if !nilIdent {
+		if v, ok := value.(*ast.Ident); ok && v.Name == "_" {
+			nilIdent = true
+		}
+	}
+	if nilIdent {
+		value = &ast.Ident{NamePos: forPos, Name: "_gop_k"}
+	}
+	if re.First == nil {
+		re.First = &ast.BasicLit{ValuePos: forPos, Kind: token.INT, Value: "0"}
+	}
+	initLhs := []ast.Expr{value}
+	initRhs := []ast.Expr{re.First}
+	replaceValue := false
+	var cond ast.Expr
+	var post ast.Expr
+	switch re.Last.(type) {
+	case *ast.Ident, *ast.BasicLit:
+		cond = re.Last
+	default:
+		replaceValue = true
+		cond = &ast.Ident{NamePos: forPos, Name: "_gop_end"}
+		initLhs = append(initLhs, cond)
+		initRhs = append(initRhs, re.Last)
+	}
+	if re.Expr3 == nil {
+		post = &ast.BasicLit{ValuePos: forPos, Kind: token.INT, Value: "1"}
+	} else {
+		switch re.Expr3.(type) {
+		case *ast.Ident, *ast.BasicLit:
+			post = re.Expr3
+		default:
+			replaceValue = true
+			post = &ast.Ident{NamePos: forPos, Name: "_gop_step"}
+			initLhs = append(initLhs, post)
+			initRhs = append(initRhs, re.Expr3)
+		}
+	}
+	if tok == token.ASSIGN && replaceValue {
+		oldValue := value
+		value = &ast.Ident{NamePos: forPos, Name: "_gop_k"}
+		initLhs[0] = value
+		body.List = append([]ast.Stmt{&ast.AssignStmt{
+			Lhs:    []ast.Expr{oldValue},
+			TokPos: forPos,
+			Tok:    token.ASSIGN,
+			Rhs:    []ast.Expr{value},
+		}}, body.List...)
+		tok = token.DEFINE
+	}
+	return &ast.ForStmt{
+		For: forPos,
+		Init: &ast.AssignStmt{
+			Lhs:    initLhs,
+			TokPos: re.To,
+			Tok:    tok,
+			Rhs:    initRhs,
+		},
+		Cond: &ast.BinaryExpr{
+			X:     value,
+			OpPos: re.To,
+			Op:    token.LSS,
+			Y:     cond,
+		},
+		Post: &ast.AssignStmt{
+			Lhs:    []ast.Expr{value},
+			TokPos: re.Colon2,
+			Tok:    token.ADD_ASSIGN,
+			Rhs:    []ast.Expr{post},
+		},
+		Body: body,
+	}
 }
 
 // for init; cond then
@@ -387,6 +505,8 @@ func compileTypeSwitchStmt(ctx *blockCtx, v *ast.TypeSwitchStmt) {
 	}
 	compileExpr(ctx, ta.X)
 	cb.TypeAssertThen()
+	seen := make(map[types.Type]ast.Expr)
+	var firstDefault ast.Stmt
 	for _, stmt := range v.Body.List {
 		c, ok := stmt.(*ast.CaseClause)
 		if !ok {
@@ -394,6 +514,33 @@ func compileTypeSwitchStmt(ctx *blockCtx, v *ast.TypeSwitchStmt) {
 		}
 		for _, citem := range c.List {
 			compileExpr(ctx, citem)
+			T := cb.Get(-1).Type
+			if tt, ok := T.(*gox.TypeType); ok {
+				T = tt.Type()
+			}
+			var haserr bool
+			for t, other := range seen {
+				if T == nil && t == nil || T != nil && t != nil && types.Identical(T, t) {
+					haserr = true
+					pos := ctx.Position(citem.Pos())
+					if T == types.Typ[types.UntypedNil] {
+						ctx.handleCodeErrorf(&pos, "multiple nil cases in type switch (first at %v)", ctx.Position(other.Pos()))
+					} else {
+						ctx.handleCodeErrorf(&pos, "duplicate case %s in type switch\n\tprevious case at %v", T, ctx.Position(other.Pos()))
+					}
+				}
+			}
+			if !haserr {
+				seen[T] = citem
+			}
+		}
+		if c.List == nil {
+			if firstDefault != nil {
+				pos := ctx.Position(c.Pos())
+				ctx.handleCodeErrorf(&pos, "multiple defaults in type switch (first at %v)", ctx.Position(firstDefault.Pos()))
+			} else {
+				firstDefault = c
+			}
 		}
 		cb.TypeCase(len(c.List)) // TypeCase(0) means default case
 		compileStmts(ctx, c.Body)
@@ -425,6 +572,8 @@ func compileSwitchStmt(ctx *blockCtx, v *ast.SwitchStmt) {
 		cb.None() // switch {...}
 	}
 	cb.Then()
+	seen := make(valueMap)
+	var firstDefault ast.Stmt
 	for _, stmt := range v.Body.List {
 		c, ok := stmt.(*ast.CaseClause)
 		if !ok {
@@ -432,6 +581,37 @@ func compileSwitchStmt(ctx *blockCtx, v *ast.SwitchStmt) {
 		}
 		for _, citem := range c.List {
 			compileExpr(ctx, citem)
+			v := cb.Get(-1)
+			if val := goVal(v.CVal); val != nil {
+				// look for duplicate types for a given value
+				// (quadratic algorithm, but these lists tend to be very short)
+				typ := types.Default(v.Type)
+				var haserr bool
+				for _, vt := range seen[val] {
+					if types.Identical(typ, vt.typ) {
+						haserr = true
+						src, pos := ctx.LoadExpr(v.Src)
+						if _, ok := v.Src.(*ast.BasicLit); ok {
+							ctx.handleCodeErrorf(&pos, "duplicate case %s in switch\n\tprevious case at %v",
+								src, ctx.Position(vt.pos))
+						} else {
+							ctx.handleCodeErrorf(&pos, "duplicate case %s (value %#v) in switch\n\tprevious case at %v",
+								src, val, ctx.Position(vt.pos))
+						}
+					}
+				}
+				if !haserr {
+					seen[val] = append(seen[val], valueType{v.Src.Pos(), typ})
+				}
+			}
+		}
+		if c.List == nil {
+			if firstDefault != nil {
+				pos := ctx.Position(c.Pos())
+				ctx.handleCodeErrorf(&pos, "multiple defaults in switch (first at %v)", ctx.Position(firstDefault.Pos()))
+			} else {
+				firstDefault = c
+			}
 		}
 		cb.Case(len(c.List)) // Case(0) means default case
 		body, has := hasFallthrough(c.Body)
@@ -571,6 +751,42 @@ func compileType(ctx *blockCtx, t *ast.TypeSpec) {
 	} else {
 		ctx.cb.NewType(name).InitType(ctx.pkg, toType(ctx, t.Type))
 	}
+}
+
+type (
+	valueMap  map[interface{}][]valueType // underlying Go value -> valueType
+	valueType struct {
+		pos token.Pos
+		typ types.Type
+	}
+)
+
+// goVal returns the Go value for val, or nil.
+func goVal(val constant.Value) interface{} {
+	// val should exist, but be conservative and check
+	if val == nil {
+		return nil
+	}
+	// Match implementation restriction of other compilers.
+	// gc only checks duplicates for integer, floating-point
+	// and string values, so only create Go values for these
+	// types.
+	switch val.Kind() {
+	case constant.Int:
+		if x, ok := constant.Int64Val(val); ok {
+			return x
+		}
+		if x, ok := constant.Uint64Val(val); ok {
+			return x
+		}
+	case constant.Float:
+		if x, ok := constant.Float64Val(val); ok {
+			return x
+		}
+	case constant.String:
+		return constant.StringVal(val)
+	}
+	return nil
 }
 
 // -----------------------------------------------------------------------------

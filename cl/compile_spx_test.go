@@ -1,18 +1,18 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cl_test
 
@@ -71,6 +71,50 @@ func gopSpxTestEx(t *testing.T, gmx, spxcode, expected, gmxfile, spxfile string)
 	if result != expected {
 		t.Fatalf("\nResult:\n%s\nExpected:\n%s\n", result, expected)
 	}
+}
+
+func gopSpxErrorTestEx(t *testing.T, msg, gmx, spxcode, gmxfile, spxfile string) {
+	fs := newTwoFileFS("/foo", spxfile, spxcode, gmxfile, gmx)
+	pkgs, err := parser.ParseFSDir(gblFset, fs, "/foo", nil, 0)
+	if err != nil {
+		scanner.PrintError(os.Stderr, err)
+		t.Fatal("ParseFSDir:", err)
+	}
+	conf := *baseConf.Ensure()
+	conf.NoFileLine = false
+	conf.WorkingDir = "/foo"
+	conf.TargetDir = "/foo"
+	bar := pkgs["main"]
+	_, err = cl.NewPackage("", bar, &conf)
+	if err == nil {
+		t.Fatal("no error?")
+	}
+	if ret := err.Error(); ret != msg {
+		t.Fatalf("\nError: \"%s\"\nExpected: \"%s\"\n", ret, msg)
+	}
+}
+
+func TestSpxError(t *testing.T) {
+	gopSpxErrorTestEx(t, `./Game.tgmx:4:2: cannot assign value to field in class file`, `
+var (
+	Kai Kai
+	userScore int = 100
+)
+`, `
+println "hi"
+`, "Game.tgmx", "Kai.tspx")
+
+	gopSpxErrorTestEx(t, `./Kai.tspx:3:2: missing field type in class file`, `
+var (
+	Kai Kai
+	userScore int
+)
+`, `
+var (
+	id = 100
+)
+println "hi"
+`, "Game.tgmx", "Kai.tspx")
 }
 
 func TestSpxBasic(t *testing.T) {

@@ -1,18 +1,18 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package gengo
 
@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/goplus/gop/ast"
@@ -139,11 +140,16 @@ func (p *Runner) GenGo(dir string, recursive bool, base *cl.Config) {
 var (
 	extPkgFlags = map[string]int{
 		".gop": PkgFlagGoPlus,
-		".spx": PkgFlagSpx,
-		".gmx": PkgFlagGmx,
 		".go":  PkgFlagGo,
 	}
 )
+
+func RegisterPkgFlags(ext string, flag int) {
+	if flag != PkgFlagGmx && flag != PkgFlagSpx {
+		panic("RegisterPkgFlags: flag should be PkgFlagGmx or PkgFlagSpx")
+	}
+	extPkgFlags[ext] = flag
+}
 
 func (p *Runner) GenGoPkg(pkgDir string, base *cl.Config) (err error) {
 	defer func() {
@@ -166,9 +172,12 @@ func (p *Runner) GenGoPkg(pkgDir string, base *cl.Config) (err error) {
 	if conf.Fset == nil {
 		conf.Fset = token.NewFileSet()
 	}
-	pkgs, err := parser.ParseDir(conf.Fset, pkgDir, nil, 0)
+	pkgs, err := parser.ParseDir(conf.Fset, pkgDir, nil, parser.ParseComments)
 	if err != nil {
 		return p.addError(pkgDir, "parse", err)
+	}
+	if len(pkgs) == 0 {
+		return syscall.ENOENT
 	}
 
 	var pkgTest *ast.Package

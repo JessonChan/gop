@@ -1,18 +1,18 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 // Package cl compiles Go+ syntax trees (ast).
 package cl
@@ -95,12 +95,8 @@ type Config struct {
 	// If WorkingDir or TargetDir is empty, it is same as Dir.
 	WorkingDir, TargetDir string
 
-	// ModPath specifies module path.
-	ModPath string
-
 	// ModRootDir specifies root dir of this module.
-	// If ModRootDir is empty, will lookup go.mod in all ancestor directories of Dir.
-	// If you specify ModPath, you should specify ModRootDir at the same time.
+	// If ModRootDir is empty, will lookup gop.mod in all ancestor directories of Dir.
 	ModRootDir string
 
 	// CacheFile specifies where cache data to write.
@@ -232,11 +228,19 @@ type typeLoader struct {
 	start        token.Pos
 }
 
-func getTypeLoader(syms map[string]loader, start token.Pos, name string) *typeLoader {
+func getTypeLoader(ctx *pkgCtx, syms map[string]loader, start token.Pos, name string) *typeLoader {
 	t, ok := syms[name]
 	if ok {
 		if start != token.NoPos {
-			panic("TODO: redefine")
+			ld := t.(*typeLoader)
+			if ld.start == token.NoPos {
+				ld.start = start
+			} else {
+				pos := ctx.Position(start)
+				ctx.handleCodeErrorf(&pos, "%s redeclared in this block\n\tprevious declaration at %v",
+					name, ctx.Position(ld.start))
+			}
+			return ld
 		}
 	} else {
 		t = &typeLoader{start: start}
@@ -398,7 +402,7 @@ func NewPackage(pkgPath string, pkg *ast.Package, conf *Config) (p *gox.Package,
 		Context:         conf.Context,
 		Logf:            conf.Logf,
 		Dir:             dir,
-		ModPath:         conf.ModPath,
+		ModRootDir:      conf.ModRootDir,
 		Env:             conf.Env,
 		BuildFlags:      conf.BuildFlags,
 		Fset:            conf.Fset,
@@ -454,6 +458,20 @@ func hasMethod(o types.Object, name string) bool {
 	return false
 }
 
+func getEntrypoint(ft ast.FileType, isMod bool) string {
+	switch ft {
+	case ast.FileTypeSpx:
+		return "Main"
+	case ast.FileTypeGmx:
+		return "MainEntry"
+	default:
+		if isMod {
+			return "init"
+		}
+		return "main"
+	}
+}
+
 func loadFile(ctx *pkgCtx, f *ast.File) {
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
@@ -465,7 +483,7 @@ func loadFile(ctx *pkgCtx, f *ast.File) {
 				}
 			} else {
 				if name, ok := getRecvTypeName(ctx, d.Recv, false); ok {
-					getTypeLoader(ctx.syms, token.NoPos, name).load()
+					getTypeLoader(ctx, ctx.syms, token.NoPos, name).load()
 				}
 			}
 		case *ast.GenDecl:
@@ -522,7 +540,7 @@ func preloadFile(p *gox.Package, parent *pkgCtx, file string, f *ast.File, targe
 		}
 		pos := f.Pos()
 		specs := getFields(ctx, f)
-		ld := getTypeLoader(syms, pos, classType)
+		ld := getTypeLoader(parent, syms, pos, classType)
 		ld.typ = func() {
 			if debugLoad {
 				log.Println("==> Load > NewType", classType)
@@ -542,6 +560,15 @@ func preloadFile(p *gox.Package, parent *pkgCtx, file string, f *ast.File, targe
 				}
 				for _, v := range specs {
 					spec := v.(*ast.ValueSpec)
+					if spec.Type == nil {
+						pos := ctx.Position(v.Pos())
+						ctx.handleCodeErrorf(&pos, "missing field type in class file")
+						continue
+					}
+					if len(spec.Values) > 0 {
+						pos := ctx.Position(v.Pos())
+						ctx.handleCodeErrorf(&pos, "cannot assign value to field in class file")
+					}
 					typ := toType(ctx, spec.Type)
 					for _, name := range spec.Names {
 						flds = append(flds, types.NewField(name.Pos(), pkg, name.Name, typ, false))
@@ -563,6 +590,9 @@ func preloadFile(p *gox.Package, parent *pkgCtx, file string, f *ast.File, targe
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
+			if f.NoEntrypoint && d.Name.Name == "main" {
+				d.Name.Name = getEntrypoint(f.FileType, f.Name.Name != "main")
+			}
 			if ctx.classRecv != nil { // in class file (.spx/.gmx)
 				if d.Recv == nil {
 					d.Recv = ctx.classRecv
@@ -591,7 +621,7 @@ func preloadFile(p *gox.Package, parent *pkgCtx, file string, f *ast.File, targe
 					if debugLoad {
 						log.Printf("==> Preload method %s.%s\n", name, d.Name.Name)
 					}
-					ld := getTypeLoader(syms, token.NoPos, name)
+					ld := getTypeLoader(parent, syms, token.NoPos, name)
 					ld.methods = append(ld.methods, func() {
 						old := p.SetInTestingFile(testingFile)
 						defer p.SetInTestingFile(old)
@@ -615,7 +645,7 @@ func preloadFile(p *gox.Package, parent *pkgCtx, file string, f *ast.File, targe
 					if debugLoad {
 						log.Println("==> Preload type", name)
 					}
-					ld := getTypeLoader(syms, t.Name.Pos(), name)
+					ld := getTypeLoader(parent, syms, t.Name.Pos(), name)
 					ld.typ = func() {
 						old := p.SetInTestingFile(testingFile)
 						defer p.SetInTestingFile(old)
@@ -630,6 +660,11 @@ func preloadFile(p *gox.Package, parent *pkgCtx, file string, f *ast.File, targe
 							log.Println("==> Load > NewType", name)
 						}
 						decl := ctx.pkg.NewType(name)
+						if t.Doc != nil {
+							decl.SetComments(t.Doc)
+						} else if d.Doc != nil {
+							decl.SetComments(d.Doc)
+						}
 						ld.typInit = func() { // decycle
 							if debugLoad {
 								log.Println("==> Load > InitType", name)
@@ -717,6 +752,9 @@ func loadFunc(ctx *blockCtx, recv *types.Var, d *ast.FuncDecl) {
 		ctx.handleErr(err)
 		return
 	}
+	if d.Doc != nil {
+		fn.SetComments(d.Doc)
+	}
 	if body := d.Body; body != nil {
 		if recv != nil {
 			ctx.inits = append(ctx.inits, func() { // interface issue: #795
@@ -785,9 +823,16 @@ func loadFuncBody(ctx *blockCtx, fn *gox.Func, body *ast.BlockStmt) {
 	cb.End()
 }
 
+func simplifyGopPackage(pkgPath string) string {
+	if strings.HasPrefix(pkgPath, "gop/") {
+		return "github.com/goplus/" + pkgPath
+	}
+	return pkgPath
+}
+
 func loadImport(ctx *blockCtx, spec *ast.ImportSpec) {
 	pkgPath := toString(spec.Path)
-	pkg := ctx.pkg.Import(pkgPath)
+	pkg := ctx.pkg.Import(simplifyGopPackage(pkgPath))
 	var name string
 	if spec.Name != nil {
 		name = spec.Name.Name
@@ -859,7 +904,17 @@ func loadVars(ctx *blockCtx, v *ast.ValueSpec, global bool) {
 			compileExpr(ctx, v.Values[0], true)
 		} else {
 			for _, val := range v.Values {
-				compileExpr(ctx, val)
+				switch e := val.(type) {
+				case *ast.LambdaExpr, *ast.LambdaExpr2:
+					if len(v.Values) == 1 {
+						sig := checkLambdaFuncType(ctx, e, typ, clLambaAssign, v.Names[0])
+						compileLambda(ctx, e, sig)
+					} else {
+						panic(ctx.newCodeErrorf(e.Pos(), "lambda unsupport multiple assignment"))
+					}
+				default:
+					compileExpr(ctx, val)
+				}
 			}
 		}
 		cb.EndInit(nv)

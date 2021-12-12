@@ -1,18 +1,18 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cl_test
 
@@ -27,6 +27,10 @@ import (
 )
 
 func codeErrorTest(t *testing.T, msg, src string) {
+	codeErrorTestEx(t, "main", msg, src)
+}
+
+func codeErrorTestEx(t *testing.T, pkgname, msg, src string) {
 	fs := parsertest.NewSingleFileFS("/foo", "bar.gop", src)
 	pkgs, err := parser.ParseFSDir(gblFset, fs, "/foo", nil, 0)
 	if err != nil {
@@ -37,7 +41,7 @@ func codeErrorTest(t *testing.T, msg, src string) {
 	conf.NoFileLine = false
 	conf.WorkingDir = "/foo"
 	conf.TargetDir = "/foo"
-	bar := pkgs["main"]
+	bar := pkgs[pkgname]
 	_, err = cl.NewPackage("", bar, &conf)
 	if err == nil {
 		t.Fatal("no error?")
@@ -67,6 +71,64 @@ func foo(func(int, int)) {
 func main() {
 	foo((x, y, z) => {})
 }
+`)
+	codeErrorTest(t, "./bar.gop:6:8: cannot use lambda literal as type int in field value to Plot", `
+type Foo struct {
+	Plot int
+}
+foo := &Foo{
+	Plot: x => (x * 2, x * x),
+}
+`)
+	codeErrorTest(t, "./bar.gop:6:8: cannot use lambda literal as type int in field value to Plot", `
+type Foo struct {
+	Plot int
+}
+foo := &Foo{
+	Plot: x => {
+		return x * 2, x * x
+	},
+}
+`)
+	codeErrorTest(t,
+		"./bar.gop:4:5: cannot use lambda literal as type int in argument to foo", `
+func foo(int) {
+}
+foo(=> {})
+`)
+	codeErrorTest(t,
+		"./bar.gop:4:5: cannot use lambda literal as type func() in argument to foo", `
+func foo(func()) {
+}
+foo => (100)
+`)
+	codeErrorTest(t,
+		"./bar.gop:6:8: cannot use lambda literal as type func() int in field value to Plot", `
+type Foo struct {
+	Plot func() int
+}
+foo := &Foo{
+	Plot: x => (x * 2, x * x),
+}
+`)
+
+	codeErrorTest(t,
+		"./bar.gop:2:18: cannot use lambda literal as type func() in assignment to foo", `
+var foo func() = => (100)
+`)
+	codeErrorTest(t,
+		"./bar.gop:3:7: cannot use lambda literal as type func() in assignment to foo", `
+var foo func()
+foo = => (100)
+`)
+	codeErrorTest(t,
+		"./bar.gop:2:29: lambda unsupport multiple assignment", `
+var foo, foo1 func() = nil, => {}
+`)
+	codeErrorTest(t,
+		"./bar.gop:3:15: lambda unsupport multiple assignment", `
+var foo func()
+_, foo = nil, => {}
 `)
 }
 
@@ -441,8 +503,7 @@ b := []int{2: a}
 }
 
 func TestErrMapLit(t *testing.T) {
-	codeErrorTest(t, // TODO: first column need correct
-		`./bar.gop:2:34: cannot use 1+2 (type untyped int) as type string in map key
+	codeErrorTest(t, `./bar.gop:2:21: cannot use 1+2 (type untyped int) as type string in map key
 ./bar.gop:3:27: cannot use "Go" + "+" (type untyped string) as type int in map value`,
 		`
 a := map[string]int{1+2: 2}
@@ -577,4 +638,163 @@ func TestErrBranchStmt(t *testing.T) {
 		`func foo() {
 	fallthrough
 }`)
+}
+
+func TestErrNoEntrypoint(t *testing.T) {
+	codeErrorTest(t,
+		"./bar.gop:2:2: undefined: println1", `func main() {
+	println1 "hello"
+}
+`)
+	codeErrorTest(t,
+		"./bar.gop:1:1: undefined: println1", `println1 "hello"`)
+
+	codeErrorTest(t,
+		"./bar.gop:2:2: undefined: println1", `
+	println1 "hello"
+`)
+	codeErrorTest(t,
+		"./bar.gop:2:2: undefined: println1", `package main
+	println1 "hello"
+`)
+	codeErrorTest(t,
+		`./bar.gop:1:9: undefined: abc`,
+		`println abc
+`)
+	codeErrorTestEx(t, "bar",
+		`./bar.gop:2:9: undefined: abc`,
+		`package bar
+println abc
+`)
+}
+
+func TestErrTypeRedefine(t *testing.T) {
+	codeErrorTest(t,
+		"./bar.gop:9:6: Point redeclared in this block\n\tprevious declaration at ./bar.gop:5:6",
+		`import "fmt"
+func (p *Point) String() string {
+	return fmt.Sprintf("%v-%v",p.X,p.Y)
+}
+type Point struct {
+	X int
+	Y int
+}
+type Point struct {
+	X int
+	Y int
+}
+`)
+}
+
+func TestErrSwitchDuplicate(t *testing.T) {
+	codeErrorTest(t,
+		"./bar.gop:4:7: duplicate case 100 in switch\n\tprevious case at ./bar.gop:3:7",
+		`var n int
+switch n {
+	case 100:
+	case 100:
+}`)
+	codeErrorTest(t,
+		"./bar.gop:4:7: duplicate case int(100) (value 100) in switch\n\tprevious case at ./bar.gop:3:7",
+		`var n int
+switch n {
+	case 100:
+	case int(100):
+}`)
+	codeErrorTest(t,
+		"./bar.gop:4:7: duplicate case 50 + 50 (value 100) in switch\n\tprevious case at ./bar.gop:3:7",
+		`var n int
+switch n {
+	case 100:
+	case 50 + 50:
+}`)
+	codeErrorTest(t,
+		"./bar.gop:5:7: duplicate case int(100) (value 100) in switch\n\tprevious case at ./bar.gop:3:7",
+		`var n interface{}
+switch n {
+	case 100:
+	case uint(100):
+	case int(100):
+}`)
+	codeErrorTest(t,
+		"./bar.gop:4:7: duplicate case 100.0 in switch\n\tprevious case at ./bar.gop:3:7",
+		`var n interface{}
+switch n {
+	case 100.0:
+	case 100.0:
+}`)
+	codeErrorTest(t,
+		"./bar.gop:5:7: duplicate case v (value 100) in switch\n\tprevious case at ./bar.gop:4:7",
+		`var n interface{}
+const v = 100.0
+switch n {
+	case 100.0:
+	case v:
+}`)
+	codeErrorTest(t,
+		"./bar.gop:5:7: duplicate case v (value \"hello\") in switch\n\tprevious case at ./bar.gop:4:7",
+		`var n interface{}
+const v = "hello"
+switch n {
+	case "hello":
+	case v:
+}`)
+	codeErrorTest(t,
+		`./bar.gop:4:7: duplicate case 100 in switch
+	previous case at ./bar.gop:3:7
+./bar.gop:5:7: duplicate case 50 + 50 (value 100) in switch
+	previous case at ./bar.gop:3:7`,
+		`var n int
+switch n {
+	case 100:
+	case 100:
+	case 50 + 50:
+}`)
+	codeErrorTest(t,
+		"./bar.gop:4:2: multiple defaults in switch (first at ./bar.gop:3:2)",
+		`var n interface{}
+switch n {
+	default:
+	default:
+}`)
+	codeErrorTest(t, `./bar.gop:4:2: multiple defaults in switch (first at ./bar.gop:3:2)
+./bar.gop:5:2: multiple defaults in switch (first at ./bar.gop:3:2)`,
+		`var n interface{}
+switch n {
+	default:
+	default:
+	default:
+}`)
+}
+
+func TestErrTypeSwitchDuplicate(t *testing.T) {
+	codeErrorTest(t, `./bar.gop:4:7: duplicate case int in type switch
+	previous case at ./bar.gop:3:7
+./bar.gop:5:7: duplicate case int in type switch
+	previous case at ./bar.gop:3:7`,
+		`var n interface{} = 100
+switch n.(type) {
+	case int:
+	case int:
+	case int:
+}
+`)
+	codeErrorTest(t, `./bar.gop:4:7: multiple nil cases in type switch (first at ./bar.gop:3:7)
+./bar.gop:5:7: multiple nil cases in type switch (first at ./bar.gop:3:7)`,
+		`var n interface{} = 100
+switch n.(type) {
+	case nil:
+	case nil:
+	case nil:
+}
+`)
+	codeErrorTest(t, `./bar.gop:4:2: multiple defaults in type switch (first at ./bar.gop:3:2)
+./bar.gop:5:2: multiple defaults in type switch (first at ./bar.gop:3:2)`,
+		`var n interface{} = 100
+switch n.(type) {
+	default:
+	default:
+	default:
+}
+`)
 }

@@ -1,24 +1,25 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cl_test
 
 import (
 	"bytes"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -30,7 +31,6 @@ import (
 	"github.com/goplus/gop/scanner"
 	"github.com/goplus/gop/token"
 	"github.com/goplus/gox"
-	"golang.org/x/tools/go/packages"
 )
 
 var (
@@ -44,8 +44,7 @@ func init() {
 	gblFset = token.NewFileSet()
 	baseConf = &cl.Config{
 		Fset:          gblFset,
-		ModPath:       "github.com/goplus/gop",
-		ModRootDir:    ".",
+		ModRootDir:    "./internal",
 		GenGoPkg:      new(gengo.Runner).GenGoPkg,
 		CacheLoadPkgs: true,
 		NoFileLine:    true,
@@ -53,11 +52,15 @@ func init() {
 }
 
 func gopClTest(t *testing.T, gopcode, expected string, cachefile ...string) {
+	gopClTestEx(t, "main", gopcode, expected, cachefile...)
+}
+
+func gopClTestEx(t *testing.T, pkgname, gopcode, expected string, cachefile ...string) {
 	cl.SetDisableRecover(true)
 	defer cl.SetDisableRecover(false)
 
 	fs := parsertest.NewSingleFileFS("/foo", "bar.gop", gopcode)
-	pkgs, err := parser.ParseFSDir(gblFset, fs, "/foo", nil, 0)
+	pkgs, err := parser.ParseFSDir(gblFset, fs, "/foo", nil, parser.ParseComments)
 	if err != nil {
 		scanner.PrintError(os.Stderr, err)
 		t.Fatal("ParseFSDir:", err)
@@ -70,8 +73,8 @@ func gopClTest(t *testing.T, gopcode, expected string, cachefile ...string) {
 		copy.PersistLoadPkgs = true
 		conf = *copy.Ensure()
 	}
-	bar := pkgs["main"]
-	pkg, err := cl.NewPackage("", bar, &conf)
+	bar := pkgs[pkgname]
+	pkg, err := cl.NewPackage("github.com/goplus/gop/cl", bar, &conf)
 	if err != nil {
 		t.Fatal("NewPackage:", err)
 	}
@@ -1032,6 +1035,38 @@ type BigInt struct {
 
 func TestAutoProperty(t *testing.T) {
 	gopClTest(t, `import "github.com/goplus/gop/ast/goptest"
+
+func foo(script string) {
+	doc := goptest.New(script)!
+
+	println(doc.any.funcDecl.name)
+	println(doc.any.importSpec.name)
+}
+`, `package main
+
+import (
+	fmt "fmt"
+	goptest "github.com/goplus/gop/ast/goptest"
+	gopq "github.com/goplus/gop/ast/gopq"
+)
+
+func foo(script string) {
+	doc := func() (_gop_ret gopq.NodeSet) {
+		var _gop_err error
+		_gop_ret, _gop_err = goptest.New(script)
+		if _gop_err != nil {
+			panic(_gop_err)
+		}
+		return
+	}()
+	fmt.Println(doc.Any().FuncDecl().Name())
+	fmt.Println(doc.Any().ImportSpec().Name())
+}
+`)
+}
+
+func TestSimplifyAutoProperty(t *testing.T) {
+	gopClTest(t, `import "gop/ast/goptest"
 
 func foo(script string) {
 	doc := goptest.New(script)!
@@ -2302,9 +2337,15 @@ func ++(a foo) {
 	println("a++")
 }
 
+func (a foo) != (b foo) bool{
+	println("a!=b")	
+	return true
+}
+
 var a, b foo
 var c = a - b
 var d = -a       // TODO: -a have no return value!
+var e = a!=b
 `, `package main
 
 import fmt "fmt"
@@ -2320,6 +2361,10 @@ func (a foo) Gop_Sub(b foo) foo {
 	fmt.Println("a - b")
 	return foo{}
 }
+func (a foo) Gop_NE(b foo) bool {
+	fmt.Println("a!=b")
+	return true
+}
 func (a foo) Gop_Neg() {
 	fmt.Println("-a")
 }
@@ -2330,6 +2375,7 @@ func (a foo) Gop_Inc() {
 var a, b foo
 var c = a.Gop_Sub(b)
 var d = a.Gop_Neg()
+var e = a.Gop_NE(b)
 `)
 }
 
@@ -2371,11 +2417,15 @@ var a = math.Round(1.2)
 `)
 }
 
-func _TestLocalImport(t *testing.T) {
+func TestLocalImport(t *testing.T) {
 	gopClTest(t, `import "./internal/spx"
 
 var a = spx.TestIntValue
-`, `
+`, `package main
+
+import spx "github.com/goplus/gop/cl/internal/spx"
+
+var a = spx.TestIntValue
 `)
 }
 
@@ -2702,6 +2752,82 @@ func main() {
 	})
 }
 `)
+	gopClTest(t, `type Foo struct {
+	Plot func(x float64) (float64, float64)
+}
+foo := &Foo{
+	Plot: x => (x * 2, x * x),
+}`, `package main
+
+type Foo struct {
+	Plot func(x float64) (float64, float64)
+}
+
+func main() {
+	foo := &Foo{Plot: func(x float64) (float64, float64) {
+		return x * 2, x * x
+	}}
+}
+`)
+	gopClTest(t, `
+type Fn func(x float64) (float64, float64)
+type Foo struct {
+	Plot Fn
+}
+foo := &Foo{
+	Plot: x => (x * 2, x * x),
+}`, `package main
+
+type Fn func(x float64) (float64, float64)
+type Foo struct {
+	Plot Fn
+}
+
+func main() {
+	foo := &Foo{Plot: func(x float64) (float64, float64) {
+		return x * 2, x * x
+	}}
+}
+`)
+	gopClTest(t, `
+type Fn func() (int, error)
+func Do(fn Fn) {
+}
+
+Do => (100, nil)
+`, `package main
+
+type Fn func() (int, error)
+
+func Do(fn Fn) {
+}
+func main() {
+	Do(func() (int, error) {
+		return 100, nil
+	})
+}
+`)
+	gopClTest(t, `
+var fn func(int) (int,error) = x => (x*x, nil)
+`, `package main
+
+var fn func(int) (int, error) = func(x int) (int, error) {
+	return x * x, nil
+}
+`)
+	gopClTest(t, `
+var fn func(int) (int,error)
+fn = x => (x*x, nil)
+`, `package main
+
+var fn func(int) (int, error)
+
+func main() {
+	fn = func(x int) (int, error) {
+		return x * x, nil
+	}
+}
+`)
 }
 
 func TestLambdaExpr2(t *testing.T) {
@@ -2723,6 +2849,111 @@ func main() {
 	Do(func() {
 		fmt.Println("Hi")
 	})
+}
+`)
+	gopClTest(t, `
+func Do(fn func() (int, error)) {
+	// ...
+}
+
+Do => {
+	return 100, nil
+}
+`, `package main
+
+func Do(fn func() (int, error)) {
+}
+func main() {
+	Do(func() (int, error) {
+		return 100, nil
+	})
+}
+`)
+	gopClTest(t, `type Foo struct {
+	Plot func(x float64) (float64, float64)
+}
+foo := &Foo{
+	Plot: x => {
+		return x * 2, x * x
+	},
+}`, `package main
+
+type Foo struct {
+	Plot func(x float64) (float64, float64)
+}
+
+func main() {
+	foo := &Foo{Plot: func(x float64) (float64, float64) {
+		return x * 2, x * x
+	}}
+}
+`)
+	gopClTest(t, `
+type Fn func(x float64) (float64, float64)
+type Foo struct {
+	Plot Fn
+}
+foo := &Foo{
+	Plot: x => {
+		return x * 2, x * x
+	},
+}`, `package main
+
+type Fn func(x float64) (float64, float64)
+type Foo struct {
+	Plot Fn
+}
+
+func main() {
+	foo := &Foo{Plot: func(x float64) (float64, float64) {
+		return x * 2, x * x
+	}}
+}
+`)
+
+	gopClTest(t, `
+type Fn func() (int, error)
+func Do(fn Fn) {
+}
+
+Do => {
+	return 100, nil
+}
+`, `package main
+
+type Fn func() (int, error)
+
+func Do(fn Fn) {
+}
+func main() {
+	Do(func() (int, error) {
+		return 100, nil
+	})
+}
+`)
+	gopClTest(t, `
+var fn func(int) (int,error) = x => {
+	return x * x, nil
+}
+`, `package main
+
+var fn func(int) (int, error) = func(x int) (int, error) {
+	return x * x, nil
+}
+`)
+	gopClTest(t, `
+var fn func(int) (int,error)
+fn = x => {
+	return x * x, nil
+}
+`, `package main
+
+var fn func(int) (int, error)
+
+func main() {
+	fn = func(x int) (int, error) {
+		return x * x, nil
+	}
 }
 `)
 }
@@ -2919,9 +3150,9 @@ var (
 )
 
 func removeAutogenFiles() {
-	os.Remove("../tutorial/14-Using-goplus-in-Go/foo/gop_autogen.go")
-	os.Remove("../tutorial/14-Using-goplus-in-Go/foo/gop_autogen_test.go")
-	os.Remove("../tutorial/14-Using-goplus-in-Go/foo/gop_autogen2_test.go")
+	os.Remove("./internal/gop-in-go/foo/gop_autogen.go")
+	os.Remove("./internal/gop-in-go/foo/gop_autogen_test.go")
+	os.Remove("./internal/gop-in-go/foo/gop_autogen2_test.go")
 }
 
 func TestImportGopPkg(t *testing.T) {
@@ -2929,7 +3160,7 @@ func TestImportGopPkg(t *testing.T) {
 	defer autogen.Unlock()
 
 	removeAutogenFiles()
-	gopClTest(t, `import "github.com/goplus/gop/tutorial/14-Using-goplus-in-Go/foo"
+	gopClTest(t, `import "github.com/goplus/gop/cl/internal/gop-in-go/foo"
 
 rmap := foo.ReverseMap(map[string]int{"Hi": 1, "Hello": 2})
 println(rmap)
@@ -2937,7 +3168,7 @@ println(rmap)
 
 import (
 	fmt "fmt"
-	foo "github.com/goplus/gop/tutorial/14-Using-goplus-in-Go/foo"
+	foo "github.com/goplus/gop/cl/internal/gop-in-go/foo"
 )
 
 func main() {
@@ -2945,31 +3176,6 @@ func main() {
 	fmt.Println(rmap)
 }
 `)
-}
-
-// bugfix (only depends order of testing functions)
-// vet: open tutorial/14-Using-goplus-in-Go/foo/gop_autogen.go: no such file or directory
-func TestGopkgDep(t *testing.T) {
-	autogen.Lock()
-	defer autogen.Unlock()
-
-	removeAutogenFiles()
-	const (
-		loadTypes = packages.NeedImports | packages.NeedDeps | packages.NeedTypes
-		loadModes = loadTypes | packages.NeedName | packages.NeedModule
-	)
-	loadConf := &packages.Config{Mode: loadModes, Fset: gblFset}
-	pkgs, err := baseConf.Ensure().PkgsLoader.Load(
-		loadConf, "github.com/goplus/gop/tutorial/14-Using-goplus-in-Go/gomain")
-	if err != nil {
-		t.Fatal("PkgsLoader.Load failed:", err)
-	}
-	for _, err = range pkgs[0].Errors {
-		t.Fatal("PkgsLoader.Load failed:", err)
-	}
-	if pkgs[0].Name != "main" {
-		t.Fatal("pkg name:", pkgs[0].Name)
-	}
 }
 
 func TestCallDep(t *testing.T) {
@@ -3046,4 +3252,357 @@ func newRepo() Repo {
 }
 `, "")
 	}
+}
+
+func testRangeExpr(t *testing.T, codeTpl, expect string) {
+	for k, s := range []string{" <- ", " := range ", " = range "} {
+		if k == 2 {
+			codeTpl = "i:=0\n" + codeTpl
+			expect = strings.Replace(expect, "for i := ", "i := 0\n\tfor i = ", -1)
+		}
+		gopClTest(t, strings.Replace(codeTpl, "$", s, -1), expect)
+	}
+}
+
+func TestRangeExpr(t *testing.T) {
+	testRangeExpr(t, `
+for i $ :10 {
+	println(i)
+}`, `package main
+
+import fmt "fmt"
+
+func main() {
+	for i := 0; i < 10; i += 1 {
+		fmt.Println(i)
+	}
+}
+`)
+}
+
+func TestRangeExpr2(t *testing.T) {
+	testRangeExpr(t, `
+for i $ 1:10:2 {
+	println(i)
+}`, `package main
+
+import fmt "fmt"
+
+func main() {
+	for i := 1; i < 10; i += 2 {
+		fmt.Println(i)
+	}
+}
+`)
+}
+
+func TestRangeExpr3(t *testing.T) {
+	testRangeExpr(t, `
+for i $ 1:10 {
+	println(i)
+}`, `package main
+
+import fmt "fmt"
+
+func main() {
+	for i := 1; i < 10; i += 1 {
+		fmt.Println(i)
+	}
+}
+`)
+}
+
+func TestRangeExpr4(t *testing.T) {
+	testRangeExpr(t, `
+for i $ :10:2 {
+	println(i)
+}`, `package main
+
+import fmt "fmt"
+
+func main() {
+	for i := 0; i < 10; i += 2 {
+		fmt.Println(i)
+	}
+}
+`)
+}
+
+func TestRangeExpr5(t *testing.T) {
+	gopClTest(t, `
+for range :10 {
+	println("Hi")
+}`, `package main
+
+import fmt "fmt"
+
+func main() {
+	for _gop_k := 0; _gop_k < 10; _gop_k += 1 {
+		fmt.Println("Hi")
+	}
+}
+`)
+}
+
+func TestRangeExpr6(t *testing.T) {
+	gopClTest(t, `
+for _ <- :10 {
+	println("Hi")
+}`, `package main
+
+import fmt "fmt"
+
+func main() {
+	for _gop_k := 0; _gop_k < 10; _gop_k += 1 {
+		fmt.Println("Hi")
+	}
+}
+`)
+}
+
+func TestRangeExpr7(t *testing.T) {
+	gopClTest(t, `
+println [x for x <- 0:3:1]
+`, `package main
+
+import (
+	fmt "fmt"
+	builtin "github.com/goplus/gop/builtin"
+)
+
+func main() {
+	fmt.Println(func() (_gop_ret []int) {
+		for _gop_it := builtin.NewRange__0(0, 3, 1).Gop_Enum(); ; {
+			var _gop_ok bool
+			x, _gop_ok := _gop_it.Next()
+			if !_gop_ok {
+				break
+			}
+			_gop_ret = append(_gop_ret, x)
+		}
+		return
+	}())
+}
+`)
+}
+
+func testRangeExpr8(t *testing.T, codeTpl, expect string) {
+	for _, s := range []string{" <- ", " := range "} {
+		gopClTest(t, strings.Replace(codeTpl, "$", s, -1), expect)
+	}
+}
+
+func TestRangeExpr8(t *testing.T) {
+	testRangeExpr8(t, `
+	type T struct{}
+
+	func (t T)start()int{
+		return 0
+	}
+	func (t T)end()int{
+		return 3 
+	}
+	func (t T)step()int{
+		return 1 
+	}
+	
+	t:=T{}
+	
+	for i <- t.start():t.end():t.step(){
+		println i
+	}
+	`, `package main
+
+import fmt "fmt"
+
+type T struct {
+}
+
+func (t T) start() int {
+	return 0
+}
+func (t T) end() int {
+	return 3
+}
+func (t T) step() int {
+	return 1
+}
+func main() {
+	t := T{}
+	for i, _gop_end, _gop_step := t.start(), t.end(), t.step(); i < _gop_end; i += _gop_step {
+		fmt.Println(i)
+	}
+}
+`)
+}
+
+func TestRangeExpr9(t *testing.T) {
+	testRangeExpr8(t, `
+	type T struct{}
+
+	func (t T)start()int{
+		return 0
+	}
+	func (t T)end()int{
+		return 3 
+	}
+	func (t T)step()int{
+		return 1 
+	}
+	
+	t:=T{}
+	i:=0
+	for i =range t.start():t.end():t.step(){
+		println i
+	}
+	`, `package main
+
+import fmt "fmt"
+
+type T struct {
+}
+
+func (t T) start() int {
+	return 0
+}
+func (t T) end() int {
+	return 3
+}
+func (t T) step() int {
+	return 1
+}
+func main() {
+	t := T{}
+	i := 0
+	for _gop_k, _gop_end, _gop_step := t.start(), t.end(), t.step(); _gop_k < _gop_end; _gop_k += _gop_step {
+		i = _gop_k
+		fmt.Println(i)
+	}
+}
+`)
+}
+
+func TestGoFuncInstr(t *testing.T) {
+	gopClTest(t, `package main
+
+//go:noinline
+//go:uintptrescapes
+func test(s string, p, q uintptr, rest ...uintptr) int {
+}`, `package main
+//go:noinline
+//go:uintptrescapes
+func test(s string, p uintptr, q uintptr, rest ...uintptr) int {
+}
+`)
+}
+
+func TestGoTypeInstr(t *testing.T) {
+	gopClTest(t, `package main
+
+//go:notinheap
+type S struct{ x int }
+`, `package main
+//go:notinheap
+type S struct {
+	x int
+}
+`)
+}
+
+func TestNoEntrypoint(t *testing.T) {
+	gopClTest(t, `println("init")
+`, `package main
+
+import fmt "fmt"
+
+func main() {
+	fmt.Println("init")
+}
+`)
+	gopClTestEx(t, "bar", `package bar
+println("init")
+`, `package bar
+
+import fmt "fmt"
+
+func init() {
+	fmt.Println("init")
+}
+`)
+}
+
+func TestParentExpr(t *testing.T) {
+	gopClTest(t, `var t1 *(int)
+var t2 chan (int)
+`, `package main
+
+var t1 *int
+var t2 chan int
+`)
+}
+
+func TestCommandStyle(t *testing.T) {
+	gopClTest(t, `
+println []
+println {}
+`, `package main
+
+import fmt "fmt"
+
+func main() {
+	fmt.Println([]interface {
+	}{})
+	fmt.Println(map[string]interface {
+	}{})
+}
+`)
+}
+
+func TestTypeLoader(t *testing.T) {
+	gopClTest(t, `import "fmt"
+
+func (p *Point) String() string {
+	return fmt.Sprintf("%v-%v",p.X,p.Y)
+}
+
+type Point struct {
+	X int
+	Y int
+}
+`, `package main
+
+import fmt "fmt"
+
+type Point struct {
+	X int
+	Y int
+}
+
+func (p *Point) String() string {
+	return fmt.Sprintf("%v-%v", p.X, p.Y)
+}
+`)
+}
+
+func TestCallPrintln(t *testing.T) {
+	gopClTest(t, `
+print
+print "hello"
+print("hello")
+println
+println "hello"
+println("hello")
+`, `package main
+
+import fmt "fmt"
+
+func main() {
+	fmt.Print()
+	fmt.Print("hello")
+	fmt.Print("hello")
+	fmt.Println()
+	fmt.Println("hello")
+	fmt.Println("hello")
+}
+`)
 }

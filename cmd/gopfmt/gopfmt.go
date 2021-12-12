@@ -1,18 +1,18 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package main
 
@@ -69,7 +69,7 @@ func processFile(filename string, in io.Reader, out io.Writer) error {
 		return err
 	}
 
-	res, err := format.Source(src)
+	res, err := format.Source(src, filename)
 	if err != nil {
 		return err
 	}
@@ -111,7 +111,9 @@ func walk(path string, d fs.DirEntry, err error) error {
 		ext := filepath.Ext(path)
 		if _, ok := extGops[ext]; ok {
 			procCnt++
-			err = processFile(path, nil, nil)
+			if err = processFile(path, nil, os.Stdout); err != nil {
+				report(err)
+			}
 		}
 	}
 	return err

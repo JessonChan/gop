@@ -1,18 +1,18 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package main
 
@@ -27,10 +27,12 @@ import (
 	"github.com/goplus/gop/cmd/internal/base"
 	"github.com/goplus/gop/cmd/internal/build"
 	"github.com/goplus/gop/cmd/internal/clean"
+	"github.com/goplus/gop/cmd/internal/env"
 	"github.com/goplus/gop/cmd/internal/gengo"
 	"github.com/goplus/gop/cmd/internal/gopfmt"
 	"github.com/goplus/gop/cmd/internal/help"
 	"github.com/goplus/gop/cmd/internal/install"
+	"github.com/goplus/gop/cmd/internal/mod"
 	"github.com/goplus/gop/cmd/internal/run"
 	"github.com/goplus/gop/cmd/internal/test"
 	"github.com/goplus/gop/cmd/internal/version"
@@ -47,15 +49,18 @@ func init() {
 		run.Cmd,
 		gengo.Cmd,
 		gopfmt.Cmd,
+		mod.Cmd,
 		install.Cmd,
 		build.Cmd,
 		clean.Cmd,
+		env.Cmd,
 		test.Cmd,
 		version.Cmd,
 	}
 }
 
 func main() {
+	flag.Usage = base.Usage
 	flag.Parse()
 	args := flag.Args()
 	if len(args) < 1 {

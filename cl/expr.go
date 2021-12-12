@@ -1,31 +1,30 @@
 /*
- Copyright 2021 The GoPlus Authors (goplus.org)
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+ * Copyright (c) 2021 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cl
 
 import (
+	goast "go/ast"
+	gotoken "go/token"
+	"go/types"
 	"log"
 	"math/big"
 	"reflect"
 	"strconv"
 	"strings"
-
-	goast "go/ast"
-	gotoken "go/token"
-	"go/types"
 
 	"github.com/goplus/gop/ast"
 	"github.com/goplus/gop/token"
@@ -201,6 +200,8 @@ func compileExpr(ctx *blockCtx, expr ast.Expr, twoValue ...bool) {
 		compileCompositeLit(ctx, v, nil, false)
 	case *ast.SliceLit:
 		compileSliceLit(ctx, v)
+	case *ast.RangeExpr:
+		compileRangeExpr(ctx, v)
 	case *ast.IndexExpr:
 		compileIndexExpr(ctx, v, twoValue != nil && twoValue[0])
 	case *ast.SliceExpr:
@@ -430,20 +431,18 @@ func compileCallExpr(ctx *blockCtx, v *ast.CallExpr, flags int) {
 	fnt := ctx.cb.Get(-1).Type
 	ellipsis := v.Ellipsis != gotoken.NoPos
 	for i, arg := range v.Args {
-		switch a := arg.(type) {
+		switch expr := arg.(type) {
 		case *ast.LambdaExpr:
-			idx := initFn(ctx, i, &fn, fnt, len(a.Lhs))
-			if sig, ok := fn.arg(idx, true).(*types.Signature); ok {
-				compileLambdaExpr(ctx, a, sig.Params())
-			}
+			fn.initWith(fnt, i, len(expr.Lhs))
+			sig := checkLambdaFuncType(ctx, expr, fn.arg(i, true), clLambaArgument, v.Fun)
+			compileLambdaExpr(ctx, expr, sig)
 		case *ast.LambdaExpr2:
-			idx := initFn(ctx, i, &fn, fnt, len(a.Lhs))
-			if sig, ok := fn.arg(idx, true).(*types.Signature); ok {
-				compileLambdaExpr2(ctx, a, sig.Params())
-			}
+			fn.initWith(fnt, i, len(expr.Lhs))
+			sig := checkLambdaFuncType(ctx, expr, fn.arg(i, true), clLambaArgument, v.Fun)
+			compileLambdaExpr2(ctx, expr, sig)
 		case *ast.CompositeLit:
-			idx := initFn(ctx, i, &fn, fnt, -1)
-			compileCompositeLit(ctx, a, fn.arg(idx, ellipsis), true)
+			fn.initWith(fnt, i, -1)
+			compileCompositeLit(ctx, expr, fn.arg(i, ellipsis), true)
 		default:
 			compileExpr(ctx, arg)
 		}
@@ -451,14 +450,42 @@ func compileCallExpr(ctx *blockCtx, v *ast.CallExpr, flags int) {
 	ctx.cb.CallWith(len(v.Args), ellipsis, v)
 }
 
-func initFn(ctx *blockCtx, i int, fn *fnType, fnt types.Type, nin int) int {
-	idx := i
-	fn.initWith(fnt, i, -1)
-	if !fn.inited && ctx.cb.Len() > 1 {
-		idx++
-		fn.initWith(ctx.cb.Get(-2).Type, i, nin)
+type clLambaFlag string
+
+const (
+	clLambaAssign   clLambaFlag = "assignment"
+	clLambaField    clLambaFlag = "field value"
+	clLambaArgument clLambaFlag = "argument"
+)
+
+// check lambda func type
+func checkLambdaFuncType(ctx *blockCtx, lambda ast.Expr, ftyp types.Type, flag clLambaFlag, toNode ast.Node) *types.Signature {
+	typ := ftyp
+retry:
+	switch t := typ.(type) {
+	case *types.Signature:
+		if l, ok := lambda.(*ast.LambdaExpr); ok {
+			if len(l.Rhs) != t.Results().Len() {
+				break
+			}
+		}
+		return t
+	case *types.Named:
+		typ = t.Underlying()
+		goto retry
 	}
-	return idx
+	src, _ := ctx.LoadExpr(toNode)
+	err := ctx.newCodeErrorf(lambda.Pos(), "cannot use lambda literal as type %v in %v to %v", ftyp, flag, src)
+	panic(err)
+}
+
+func compileLambda(ctx *blockCtx, lambda ast.Expr, sig *types.Signature) {
+	switch expr := lambda.(type) {
+	case *ast.LambdaExpr:
+		compileLambdaExpr(ctx, expr, sig)
+	case *ast.LambdaExpr2:
+		compileLambdaExpr2(ctx, expr, sig)
+	}
 }
 
 func compileLambdaParams(ctx *blockCtx, pos token.Pos, lhs []*ast.Ident, in *types.Tuple) []*types.Var {
@@ -483,13 +510,14 @@ func compileLambdaParams(ctx *blockCtx, pos token.Pos, lhs []*ast.Ident, in *typ
 	return params
 }
 
-func compileLambdaExpr(ctx *blockCtx, v *ast.LambdaExpr, in *types.Tuple) {
+func compileLambdaExpr(ctx *blockCtx, v *ast.LambdaExpr, sig *types.Signature) {
 	pkg := ctx.pkg
-	params := compileLambdaParams(ctx, v.Pos(), v.Lhs, in)
-	nout := len(v.Rhs)
+	params := compileLambdaParams(ctx, v.Pos(), v.Lhs, sig.Params())
+	out := sig.Results()
+	nout := out.Len()
 	results := make([]*types.Var, nout)
 	for i := 0; i < nout; i++ {
-		results[i] = pkg.NewAutoParam("")
+		results[i] = pkg.NewParam(token.NoPos, "", out.At(i).Type())
 	}
 	ctx.cb.NewClosure(types.NewTuple(params...), types.NewTuple(results...), false).BodyStart(pkg)
 	for _, v := range v.Rhs {
@@ -498,11 +526,18 @@ func compileLambdaExpr(ctx *blockCtx, v *ast.LambdaExpr, in *types.Tuple) {
 	ctx.cb.Return(nout).End()
 }
 
-func compileLambdaExpr2(ctx *blockCtx, v *ast.LambdaExpr2, in *types.Tuple) {
-	params := compileLambdaParams(ctx, v.Pos(), v.Lhs, in)
+func compileLambdaExpr2(ctx *blockCtx, v *ast.LambdaExpr2, sig *types.Signature) {
+	pkg := ctx.pkg
+	params := compileLambdaParams(ctx, v.Pos(), v.Lhs, sig.Params())
 	cb := ctx.cb
 	comments := cb.Comments()
-	fn := cb.NewClosure(types.NewTuple(params...), nil, false)
+	out := sig.Results()
+	nout := out.Len()
+	results := make([]*types.Var, nout)
+	for i := 0; i < nout; i++ {
+		results[i] = pkg.NewParam(token.NoPos, "", out.At(i).Type())
+	}
+	fn := cb.NewClosure(types.NewTuple(params...), types.NewTuple(results...), false)
 	loadFuncBody(ctx, fn, v.Body)
 	cb.SetComments(comments, false)
 }
@@ -572,12 +607,19 @@ func compileStructLitInKeyVal(ctx *blockCtx, elts []ast.Expr, t *types.Struct, t
 	for _, elt := range elts {
 		kv := elt.(*ast.KeyValueExpr)
 		name := kv.Key.(*ast.Ident).Name
-		if idx := lookupField(t, name); idx >= 0 {
+		idx := lookupField(t, name)
+		if idx >= 0 {
 			ctx.cb.Val(idx)
 		} else {
 			log.Panicln("TODO: struct member not found -", name)
 		}
-		compileExpr(ctx, kv.Value)
+		switch expr := kv.Value.(type) {
+		case *ast.LambdaExpr, *ast.LambdaExpr2:
+			sig := checkLambdaFuncType(ctx, expr, t.Field(idx).Type(), clLambaField, kv.Key)
+			compileLambda(ctx, expr, sig)
+		default:
+			compileExpr(ctx, kv.Value)
+		}
 	}
 	ctx.cb.StructLit(typ, len(elts)<<1, true)
 }
@@ -692,6 +734,23 @@ func compileSliceLit(ctx *blockCtx, v *ast.SliceLit) {
 		compileExpr(ctx, elt)
 	}
 	ctx.cb.SliceLit(nil, n)
+}
+
+func compileRangeExpr(ctx *blockCtx, v *ast.RangeExpr) {
+	pkg, cb := ctx.pkg, ctx.cb
+	cb.Val(pkg.Builtin().Ref("newRange"))
+	if v.First == nil {
+		ctx.cb.Val(0, v)
+	} else {
+		compileExpr(ctx, v.First)
+	}
+	compileExpr(ctx, v.Last)
+	if v.Expr3 == nil {
+		ctx.cb.Val(1, v)
+	} else {
+		compileExpr(ctx, v.Expr3)
+	}
+	cb.Call(3)
 }
 
 const (
